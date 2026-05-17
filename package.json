@@ -1,0 +1,77 @@
+{
+  "name": "tyle-desktop",
+  "version": "1.0.0",
+  "description": "ty\\e — AI engineering assistant (desktop)",
+  "main": "main.js",
+  "author": {
+    "name": "GooveXCo",
+    "email": "hello@tylellm.com",
+    "url": "https://tylellm.com"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "homepage": "https://tylellm.com",
+  "scripts": {
+    "start": "electron .",
+    "dev": "TYLE_DEV_URL=http://localhost:8000/app electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder -mwl",
+    "dist:mac": "electron-builder --mac",
+    "dist:win": "electron-builder --win",
+    "dist:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.goovex.tyle",
+    "productName": "ty\\e",
+    "copyright": "Copyright © 2026 GooveXCo Ltd.",
+    "directories": {
+      "buildResources": "build",
+      "output": "dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "build/icon.*"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "target": [
+        { "target": "dmg",  "arch": ["arm64", "x64"] },
+        { "target": "zip",  "arch": ["arm64", "x64"] }
+      ],
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        { "target": "nsis",     "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "ty\\e"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "category": "Utility;Office",
+      "target": ["AppImage", "deb", "rpm"]
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "goovexco-glitch",
+      "repo": "ty-e",
+      "releaseType": "release"
+    }
+  }
+}
