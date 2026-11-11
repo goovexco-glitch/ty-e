@@ -27,6 +27,13 @@ function hostOf(url) {
   try { return new URL(url).host; } catch (_) { return ''; }
 }
 
+// Only web links and mailto: leave the app (to the user's browser or mail app).
+// Any other scheme is dropped, so a page cannot start an OS protocol handler
+// (custom protocols, file://server/share, ...).
+function openOutside(url) {
+  if (/^(https?|mailto):/i.test(url)) shell.openExternal(url).catch(() => {});
+}
+
 // TYLE_DEV_URL points the window at a local server. An installed build only
 // accepts a local address, so an environment variable cannot send it (and its
 // microphone permission) to another site.
@@ -79,9 +86,16 @@ function createWindow() {
   // This matters for payment (Stripe) and OAuth redirects — those need to
   // stay in the user's browser session for cookies / extensions to work.
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    // window.open('mailto:…', '_blank') would leave an empty child window behind
+    if (/^mailto:/i.test(url)) {
+      openOutside(url);
+      return { action: 'deny' };
+    }
+    // custom protocols, file: and the like never get a window
+    if (!/^(https?|about|blob|data):/i.test(url)) return { action: 'deny' };
     const host = hostOf(url);
     if (host && host !== HOST) {
-      shell.openExternal(url);
+      openOutside(url);
       return { action: 'deny' };
     }
     return { action: 'allow' };
@@ -94,7 +108,7 @@ function createWindow() {
     const host = hostOf(url);
     if (host && host !== HOST) {
       event.preventDefault();
-      shell.openExternal(url);
+      openOutside(url);
     }
   });
 
@@ -208,27 +222,27 @@ app.on('second-instance', () => {
 });
 
 app.whenReady().then(async () => {
-  // ── Microphone permission ──
-  // Electron's default permission handler denies media access, which makes
-  // navigator.mediaDevices.getUserMedia({audio:true}) reject with
-  // NotAllowedError. Auto-allow `media` (mic) for our own origin only.
+  // ── Permissions ──
+  // With no handler Electron grants every permission to every page (1.0.x
+  // shipped that way). Grant only what the web app uses, and only to its own
+  // host: microphone and camera, clipboard copy (paste needs no permission),
+  // element fullscreen (CAD view), and mailto: links. Everything else is
+  // denied, including clipboard reads and other external protocols.
   const allowedHost = HOST;
   const ses = session.defaultSession;
+  const REQUEST_OK = new Set(['media', 'clipboard-sanitized-write', 'fullscreen']);
+  const CHECK_OK = new Set(['media', 'clipboard-sanitized-write', 'fullscreen']);
   ses.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const url = (details && details.requestingUrl) || webContents.getURL();
-    let host = '';
-    try { host = new URL(url).host; } catch (_) {}
-    if ((permission === 'media' || permission === 'audioCapture') && host === allowedHost) {
-      return callback(true);
+    if (hostOf(url) !== allowedHost) return callback(false);
+    if (REQUEST_OK.has(permission)) return callback(true);
+    if (permission === 'openExternal') {
+      return callback(/^mailto:/i.test((details && details.externalURL) || ''));
     }
-    if (permission === 'clipboard-read' && host === allowedHost) return callback(true);
     callback(false);
   });
   ses.setPermissionCheckHandler((_wc, permission, requestingOrigin) => {
-    let host = '';
-    try { host = new URL(requestingOrigin).host; } catch (_) {}
-    if ((permission === 'media' || permission === 'audioCapture') && host === allowedHost) return true;
-    return false;
+    return hostOf(requestingOrigin) === allowedHost && CHECK_OK.has(permission);
   });
 
   // macOS gates mic at the OS level — must ask explicitly the first time.

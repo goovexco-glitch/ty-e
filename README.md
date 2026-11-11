@@ -13,6 +13,9 @@ desktop/
 ├── main.js          # Electron main process (window, menu, tray, hotkey)
 ├── updater.js       # shell updates (electron-updater, GitHub Releases)
 ├── preload.js       # Safe IPC bridge → window.tyle.isDesktop / appVersion
+│                    # (main.js grants the page only mic/camera, clipboard
+│                    #  copy, fullscreen and mailto:, and only on its own
+│                    #  host; only http(s) and mailto: links leave the app)
 ├── package.json     # npm + electron-builder config (versions pinned)
 ├── build/           # made by tools/mk_icons.py from the hexagon mark
 │   ├── icon.png     # 1024 px app icon (the dark tile, as icon-hex-512 on the site)
@@ -109,12 +112,20 @@ writes into `resources/app-update.yml` (from `build.publish`). From 1.1.0 on:
   back. Log: `%APPDATA%\tyle-desktop\logs\updater.log`.
 - **Portable:** cannot replace itself; it says a new version is out and opens
   `tylellm.com/download`.
-- **Off:** `npm start`, macOS (needs signing), Linux other than AppImage,
-  `TYLE_DISABLE_UPDATES=1`.
+- **Off:** `npm start`, macOS (needs signing), Linux (no `latest-linux.yml` is
+  released), `TYLE_DISABLE_UPDATES=1`.
 - 1.0.x had no updater: those users reinstall once.
 
 It reads `github.com/<owner>/<repo>/releases.atom` and `/releases/latest` (no API
-token, no rate limit). Draft releases are invisible to it.
+token, no rate limit). Draft releases are invisible to it. It sends a constant
+`x-user-staging-id` (all zeros): electron-updater would otherwise send a random
+per-install ID to GitHub on every check, and staged rollouts are not used.
+
+**Trust:** the builds are unsigned, so an update is trusted because it comes from
+this repo's latest release (its sha512 is in `latest.yml` on the same release).
+Whoever can publish a release here can run code on every installed copy: keep 2FA
+on the account and do not leave a release token on a shared machine. Code signing
+(`win.signtoolOptions.publisherName`) makes electron-updater check the publisher too.
 
 ### Releasing (Windows)
 
@@ -124,13 +135,18 @@ token, no rate limit). Draft releases are invisible to it.
    (version, name, sha512, size), adds `tye-Setup-x64.exe` (same bytes, fixed
    name for the website) and `SHA256SUMS.txt`.
 4. `gh auth login` (yourself), then `node tools/release.mjs` — creates the
-   **draft** release `v<version>` with the six files.
+   **draft** release `v<version>` with the six files. After a rebuild of the same
+   version, `node tools/release.mjs --replace` swaps the draft's files and notes.
 5. Look at the draft on GitHub, then `node tools/release.mjs --publish`.
    Installed apps pick it up within 6 hours.
 
-`/download` links `releases/latest/download/tye-Setup-x64.exe` and
+Every upload and the publish compare each file on GitHub with `dist/` (state,
+size, sha256) and stop on any difference.
+
+From the web release that ships with 1.1.0, `/download` links
+`releases/latest/download/tye-Setup-x64.exe` and
 `releases/latest/download/tye-portable-x64.exe`, so the page does not change per
-release.
+release. Releases before 1.1.0 do not have those two names.
 
 ## Download counts
 

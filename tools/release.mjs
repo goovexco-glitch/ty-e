@@ -4,9 +4,13 @@
 //   npm run dist:win                    build dist/ (unsigned)
 //   node tools/release.mjs --check      check dist/ and add the extra files; no upload
 //   node tools/release.mjs              the same, then create the draft release v<version>
+//   node tools/release.mjs --replace    the same, then replace the files (and notes) of the existing
+//                                       DRAFT v<version>, after a rebuild; never a published release
 //   node tools/release.mjs --publish    publish the draft v<version> (after you have looked at it)
 //
-// Needs the GitHub CLI signed in with write access to the repo (run `gh auth login` yourself).
+// Every upload and the publish first compare each file on GitHub with dist/: state uploaded, same
+// size, same sha256. Needs the GitHub CLI signed in with write access to the repo (run
+// `gh auth login` yourself).
 //
 // What goes up, and why:
 //   latest.yml                       the updater's feed: version, file name, sha512, size
@@ -33,6 +37,8 @@ const TAG = `v${V}`;
 const SETUP = `tye-Setup-${V}.exe`;
 const WEB_SETUP = 'tye-Setup-x64.exe';
 const PORTABLE = 'tye-portable-x64.exe';
+const FILES = ['latest.yml', SETUP, `${SETUP}.blockmap`, WEB_SETUP, PORTABLE, 'SHA256SUMS.txt'];
+const NOTES = path.join(ROOT, 'tools', 'release-notes', `${TAG}.md`);
 const args = process.argv.slice(2);
 
 function die(msg) { console.error(`RELEASE_STOP ${msg}`); process.exit(1); }
@@ -42,19 +48,53 @@ function gh(argv, opts = {}) {
   if (r.error) die(`gh not found (${r.error.code}); install the GitHub CLI and run gh auth login`);
   return r;
 }
-
-if (args.includes('--publish')) {
+function signedIn() {
+  // only github.com's active account: a broken second account or host must not block the release
+  const st = gh(['auth', 'status', '--hostname', 'github.com', '--active'], { stdio: 'ignore' });
+  if (st.status !== 0) die('gh is not signed in to github.com: run gh auth login');
+}
+function viewRelease() {
   const view = gh(['release', 'view', TAG, '--repo', REPO, '--json', 'isDraft,assets']);
   if (view.status !== 0) die(`no release ${TAG} on ${REPO}`);
-  const info = JSON.parse(view.stdout);
-  if (!info.isDraft) die(`${TAG} is already published`);
-  const names = info.assets.map(a => a.name).sort();
-  for (const n of ['latest.yml', SETUP, `${SETUP}.blockmap`, WEB_SETUP, PORTABLE, 'SHA256SUMS.txt']) {
-    if (!names.includes(n)) die(`the draft is missing ${n}`);
+  return JSON.parse(view.stdout);
+}
+
+// Every file on the release is the file in dist/: uploaded, same size, same sha256, nothing extra.
+function verifyAssets(info) {
+  for (const f of FILES) {
+    const a = info.assets.find(x => x.name === f);
+    const local = path.join(DIST, f);
+    if (!a) die(`the release is missing ${f}`);
+    if (!existsSync(local)) die(`dist/${f} is missing, so ${f} on GitHub cannot be compared with it`);
+    if (a.state && a.state !== 'uploaded') die(`${f} on GitHub is ${a.state}, not uploaded`);
+    const size = statSync(local).size;
+    if (a.size !== size) die(`${f}: GitHub has ${a.size} B, dist/ has ${size} B`);
+    if (!a.digest) die(`${f}: gh reports no digest; update the GitHub CLI`);
+    const want = `sha256:${hash(local, 'sha256', 'hex')}`;
+    if (a.digest !== want) die(`${f}: GitHub has ${a.digest}, dist/ has ${want}`);
   }
+  const extra = info.assets.map(a => a.name).filter(n => !FILES.includes(n));
+  if (extra.length) die(`the release has files that are not part of it: ${extra.join(', ')}`);
+  console.log(`  all ${FILES.length} files on GitHub match dist/ (state, size, sha256)`);
+}
+
+if (args.includes('--publish')) {
+  signedIn();
+  const info = viewRelease();
+  if (!info.isDraft) die(`${TAG} is already published`);
+  verifyAssets(info);
   const r = gh(['release', 'edit', TAG, '--repo', REPO, '--draft=false', '--latest'], { stdio: 'inherit' });
   if (r.status !== 0) die('gh release edit failed');
-  console.log(`RELEASE_PUBLISHED ${TAG}: installed apps pick it up within 6 hours; /download serves it now`);
+  // GitHub's API can lag a moment behind the edit: ask a few times before calling it wrong
+  let tag = '';
+  for (let i = 0; i < 6 && tag !== TAG; i++) {
+    if (i) await new Promise(res => setTimeout(res, 5000));
+    tag = (gh(['api', `repos/${REPO}/releases/latest`, '--jq', '.tag_name']).stdout || '').trim();
+  }
+  if (tag !== TAG) die(`published, but GitHub's latest release is ${tag || '(unreadable)'}, not ${TAG}`);
+  console.log(`RELEASE_PUBLISHED ${TAG} is GitHub's latest release: installed apps pick it up within 6 hours.`);
+  console.log(`  releases/latest/download/${WEB_SETUP} and ${PORTABLE} now serve it; a page that links the`);
+  console.log('  versioned names of an older release (tye-Setup-1.0.0.exe) gets 404 from now on.');
   process.exit(0);
 }
 
@@ -82,21 +122,37 @@ const sums = [SETUP, WEB_SETUP, PORTABLE]
   .map(f => `${hash(path.join(DIST, f), 'sha256', 'hex')}  ${f}`).join('\n') + '\n';
 writeFileSync(path.join(DIST, 'SHA256SUMS.txt'), sums);
 
-const files = ['latest.yml', SETUP, `${SETUP}.blockmap`, WEB_SETUP, PORTABLE, 'SHA256SUMS.txt'];
 console.log(`release ${TAG} for ${REPO}:`);
-for (const f of files) console.log(`  ${f.padEnd(34)} ${String(statSync(path.join(DIST, f)).size).padStart(10)} B`);
+for (const f of FILES) console.log(`  ${f.padEnd(34)} ${String(statSync(path.join(DIST, f)).size).padStart(10)} B`);
 process.stdout.write(sums.replace(/^/gm, '  sha256 ').replace(/  sha256 $/, ''));
 if (args.includes('--check')) { console.log('RELEASE_CHECK_OK (nothing uploaded)'); process.exit(0); }
 
-// ── the draft ──
-if (gh(['auth', 'status'], { stdio: 'ignore' }).status !== 0) die('gh is not signed in: run gh auth login');
-if (gh(['release', 'view', TAG, '--repo', REPO], { stdio: 'ignore' }).status === 0) {
-  die(`${TAG} already exists on ${REPO}; delete the draft or bump the version`);
+signedIn();
+if (!existsSync(NOTES)) die(`write the release notes first: tools/release-notes/${TAG}.md`);
+
+// ── replace the files of the existing draft ──
+if (args.includes('--replace')) {
+  const before = viewRelease();
+  if (!before.isDraft) die(`${TAG} is published; never replace the files of a published release, bump the version`);
+  const up = gh(['release', 'upload', TAG, '--repo', REPO, '--clobber', ...FILES.map(f => path.join(DIST, f))],
+    { stdio: 'inherit' });
+  if (up.status !== 0) die('gh release upload failed (the draft may now hold a mix of old and new files: run --replace again)');
+  const ed = gh(['release', 'edit', TAG, '--repo', REPO, '--notes-file', NOTES], { stdio: 'inherit' });
+  if (ed.status !== 0) die('gh release edit (notes) failed');
+  const after = viewRelease();
+  if (!after.isDraft) die(`${TAG} is no longer a draft`);
+  verifyAssets(after);
+  console.log(`RELEASE_DRAFT_REPLACED ${TAG}: check it on https://github.com/${REPO}/releases, then run node tools/release.mjs --publish`);
+  process.exit(0);
 }
-const notesFile = path.join(ROOT, 'tools', 'release-notes', `${TAG}.md`);
-if (!existsSync(notesFile)) die(`write the release notes first: tools/release-notes/${TAG}.md`);
+
+// ── the draft ──
+if (gh(['release', 'view', TAG, '--repo', REPO], { stdio: 'ignore' }).status === 0) {
+  die(`${TAG} already exists on ${REPO}; use --replace for a draft, or bump the version`);
+}
 const r = gh(['release', 'create', TAG, '--repo', REPO, '--draft',
-  '--title', `ty\\e Desktop ${TAG}`, '--notes-file', notesFile,
-  ...files.map(f => path.join(DIST, f))], { stdio: 'inherit' });
+  '--title', `ty\\e Desktop ${TAG}`, '--notes-file', NOTES,
+  ...FILES.map(f => path.join(DIST, f))], { stdio: 'inherit' });
 if (r.status !== 0) die('gh release create failed');
+verifyAssets(viewRelease());
 console.log(`RELEASE_DRAFT ${TAG}: check it on https://github.com/${REPO}/releases, then run node tools/release.mjs --publish`);

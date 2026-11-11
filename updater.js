@@ -7,12 +7,13 @@
 //                            then asks to restart. "Later" installs the next time the app quits.
 //   Portable build:          cannot replace its own .exe, so it only says a new version exists and
 //                            opens the download page.
-//   Off:                     not packaged (npm start), macOS (needs a signed build), Linux other than
-//                            AppImage, or TYLE_DISABLE_UPDATES=1.
+//   Off:                     not packaged (npm start), macOS (needs a signed build), Linux (no
+//                            latest-linux.yml is released), or TYLE_DISABLE_UPDATES=1.
 //
 // Releases are found from github.com/<owner>/<repo>/releases.atom and .../releases/latest (no API
 // token, no rate limit). Draft releases are invisible to it, so a release only reaches users once it
-// is published.
+// is published. The only header ty\e adds is a constant x-user-staging-id: electron-updater would
+// otherwise send a random per-install ID to GitHub on every check (staged rollouts are not used).
 
 'use strict';
 
@@ -25,16 +26,22 @@ const FIRST_CHECK_MS = 15 * 1000;
 const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
 const LOG_MAX_BYTES = 256 * 1024;
 const IS_PORTABLE = !!process.env.PORTABLE_EXECUTABLE_FILE;
+const NO_STAGING_ID = '00000000-0000-0000-0000-000000000000';
+const STUCK_MS = 2 * 60 * 1000;   // a check running longer than this is reported as stuck
 
 let updater = null;
 let getWindow = () => null;
 let state = 'idle';          // idle | checking | downloading | ready
 let manual = false;          // the current check came from Help > Check for Updates
 let readyVersion = null;     // downloaded and waiting for a restart
+let readyFile = null;        // the downloaded installer
 let promptedVersion = null;  // already asked about this one in this session
 let notifiedVersion = null;  // portable: already told about this one
 let waitingForWindow = false;
 let restarting = false;      // quitAndInstall was called
+let infoBox = null;          // an open "downloading" box: the restart prompt waits for it
+let checkStarted = 0;        // when the running check began (Date.now())
+let lastProgress = 0;        // when the running download last made progress
 
 // ── log: <userData>/logs/updater.log, one file, cut in half when it grows past 256 KB ──
 let logFile = null;
@@ -65,7 +72,7 @@ function supported() {
   if (!app.isPackaged) return 'not packaged';
   if (process.env.TYLE_DISABLE_UPDATES === '1') return 'TYLE_DISABLE_UPDATES=1';
   if (process.platform === 'darwin') return 'macOS build is not signed';
-  if (process.platform === 'linux' && !process.env.APPIMAGE) return 'Linux package (not AppImage)';
+  if (process.platform === 'linux') return 'no Linux update feed is released';
   return true;
 }
 
@@ -78,8 +85,25 @@ function showBox(options) {
     : dialog.showMessageBox(opts);
 }
 
+// One information box at a time ("downloading", "still checking"). It does not block the update;
+// every other update box waits until it is closed.
+function showInfo(title, message, detail) {
+  if (infoBox) return;
+  infoBox = showBox({ title, message, detail, buttons: ['OK'] })
+    .catch(() => {}).then(() => { infoBox = null; });
+}
+const STILL = 'Quit and reopen ty\\e to try again.';
+
+function showDownloading() {
+  // electron-updater has no request timeout under Electron's net module: a download that stalls
+  // stays "downloading" until the app restarts, so say so instead of promising a restart prompt.
+  if (Date.now() - lastProgress > STUCK_MS) showInfo('Updating ty\\e', 'ty\\e is still downloading the update.', STILL);
+  else showInfo('Updating ty\\e', 'A new version is downloading.', 'You will be asked to restart when it is ready.');
+}
+
+let prompting = false;        // one restart prompt at a time
 async function promptRestart(force) {
-  if (!readyVersion || (!force && promptedVersion === readyVersion)) return;
+  if (prompting || !readyVersion || (!force && promptedVersion === readyVersion)) return;
   // The window is in the tray: ask when the user brings it back, not out of nowhere.
   const win = getWindow();
   if (!force && (!win || win.isDestroyed() || !win.isVisible())) {
@@ -98,28 +122,50 @@ async function promptRestart(force) {
     win.on('focus', again);
     return;
   }
-  promptedVersion = readyVersion;
-  logger.info(`restart prompt for ${readyVersion}`);
-  const { response } = await showBox({
-    title: 'Update ready',
-    message: 'A new version of ty\\e is ready to install.',
-    detail: 'Restart now to finish updating. If you choose Later, it installs the next time you quit ty\\e.',
-    buttons: ['Restart now', 'Later'],
-    defaultId: 0,
-    cancelId: 1,
-  });
-  if (response !== 0) { logger.info('restart prompt: Later'); return; }
-  logger.info(`restart to install ${readyVersion}`);
-  // main.js hides the window on close (minimise to tray) unless app.isQuitting is set, and
-  // quitAndInstall closes the windows before app emits before-quit.
-  app.isQuitting = true;
-  restarting = true;
-  setImmediate(() => updater.quitAndInstall(true, true));
+  prompting = true;
+  try {
+    if (infoBox) await infoBox;   // never stack the restart prompt on the "downloading" box
+    promptedVersion = readyVersion;
+    logger.info(`restart prompt for ${readyVersion}`);
+    const { response } = await showBox({
+      title: 'Update ready',
+      message: 'A new version of ty\\e is ready to install.',
+      detail: 'Restart now to finish updating. If you choose Later, it installs the next time you quit ty\\e.',
+      buttons: ['Restart now', 'Later'],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response !== 0) { logger.info('restart prompt: Later'); return; }
+    // electron-updater quits even when the installer cannot be started (for example when antivirus
+    // removed it), so look for the file first and keep the app running if it is gone.
+    if (readyFile && !fs.existsSync(readyFile)) {
+      logger.warn(`downloaded installer is missing: ${readyFile}`);
+      // promptedVersion too: the next download is usually the same version and must prompt again
+      state = 'idle'; readyVersion = null; readyFile = null; promptedVersion = null;
+      await showBox({
+        type: 'warning',
+        title: 'Update failed',
+        message: 'ty\\e could not install the update.',
+        detail: 'The downloaded file is missing. ty\\e downloads it again at the next check.',
+        buttons: ['OK'],
+      });
+      return;
+    }
+    logger.info(`restart to install ${readyVersion}`);
+    // main.js hides the window on close (minimise to tray) unless app.isQuitting is set, and
+    // quitAndInstall closes the windows before app emits before-quit.
+    app.isQuitting = true;
+    restarting = true;
+    setImmediate(() => updater.quitAndInstall(true, true));
+  } finally {
+    prompting = false;
+  }
 }
 
 async function notifyPortable(info) {
   if (!manual && notifiedVersion === info.version) return;
   notifiedVersion = info.version;
+  if (infoBox) await infoBox;
   const { response } = await showBox({
     title: 'Update available',
     message: 'A new version of ty\\e is available.',
@@ -134,17 +180,16 @@ async function notifyPortable(info) {
 async function check(isManual) {
   if (!updater) return;
   if (state === 'ready') { if (isManual) promptRestart(true); return; }
-  if (state === 'checking' || state === 'downloading') {
-    if (isManual) {
-      await showBox({
-        title: 'Updating ty\\e',
-        message: 'An update is downloading.',
-        detail: 'You will be asked to restart when it is ready.',
-        buttons: ['OK'],
-      });
-    }
+  if (state === 'checking') {
+    if (!isManual) return;
+    // An automatic check is running: let its result answer the user. A check that hangs (no
+    // request timeout, see showDownloading) keeps this state until the app restarts: say so.
+    if (Date.now() - checkStarted < STUCK_MS) { manual = true; return; }
+    showInfo('Checking for updates', 'ty\\e is still checking for updates.', STILL);
     return;
   }
+  // manual too: the user was told about this download, so a failure must be reported to them
+  if (state === 'downloading') { if (isManual) { manual = true; showDownloading(); } return; }
   manual = !!isManual;
   try {
     const result = await updater.checkForUpdates();
@@ -165,12 +210,14 @@ function init(options) {
   updater.allowPrerelease = false;
   updater.allowDowngrade = false;
   updater.disableWebInstaller = true;   // the NSIS build is a full installer, never a web installer
+  updater.requestHeaders = { 'x-user-staging-id': NO_STAGING_ID };
 
-  updater.on('checking-for-update', () => { state = 'checking'; });
+  updater.on('checking-for-update', () => { state = 'checking'; checkStarted = Date.now(); });
   updater.on('update-not-available', async () => {
     state = 'idle';
     if (!manual) return;
     manual = false;
+    if (infoBox) await infoBox;
     await showBox({
       title: 'No updates',
       message: 'You are up to date.',
@@ -186,23 +233,21 @@ function init(options) {
       return;
     }
     state = 'downloading';
-    if (manual) {
-      showBox({
-        title: 'Updating ty\\e',
-        message: 'A new version is downloading.',
-        detail: 'You will be asked to restart when it is ready.',
-        buttons: ['OK'],
-      });
-    }
+    lastProgress = Date.now();
+    if (manual) showDownloading();
   });
+  // a listener also makes electron-updater report progress (it skips the work without one)
+  updater.on('download-progress', () => { lastProgress = Date.now(); });
   updater.on('update-downloaded', (event) => {
     state = 'ready';
     manual = false;
     readyVersion = event.version;
+    readyFile = event.downloadedFile || null;
     logger.info(`downloaded ${event.version}`);
     promptRestart(false);
   });
   updater.on('error', async (err) => {
+    const failedDownload = state === 'downloading';
     state = readyVersion ? 'ready' : 'idle';
     logger.error('update failed', err);
     if (restarting) {
@@ -212,7 +257,14 @@ function init(options) {
     }
     if (!manual) return;
     manual = false;
-    await showBox({
+    if (infoBox) await infoBox;   // a fast failure must not stack on the "downloading" box
+    await showBox(failedDownload ? {
+      type: 'warning',
+      title: 'Update failed',
+      message: 'ty\\e could not download the update.',
+      detail: 'It tries again at the next check. If this keeps happening, download the new version from tylellm.com.',
+      buttons: ['OK'],
+    } : {
       type: 'warning',
       title: 'Update check failed',
       message: 'ty\\e could not check for updates.',
