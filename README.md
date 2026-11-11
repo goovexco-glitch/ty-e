@@ -25,6 +25,8 @@ desktop/
 │   └── installerSidebar.bmp, uninstallerSidebar.bmp   # NSIS welcome/finish
 └── tools/
     ├── mk_icons.py          # python -I tools/mk_icons.py build  (Pillow + numpy)
+    ├── build.mjs            # the dist scripts: electron-builder + a record of the build inputs
+    ├── build-inputs.mjs     # what that record covers (shared with release.mjs)
     ├── release.mjs          # GitHub draft release from dist/
     ├── download-stats.mjs   # download counts from GitHub
     └── release-notes/v<version>.md
@@ -40,7 +42,9 @@ npm start             # open ty\e in a real Electron window
 npm run dev           # same, but loads http://localhost:8000/app instead
                       # (assumes you're running the router locally)
 
-npm run dist          # builds installers for ALL platforms → dist/ (no upload)
+npm run dist          # builds installers for ALL platforms → dist/ (no upload); the dist
+                      # scripts run tools/build.mjs: npm ci, then electron-builder with a
+                      # record of the build inputs in the app
 npm run dist:mac      # macOS only (.dmg + .zip, arm64 + x64)
 npm run dist:win      # Windows only (.exe NSIS + portable)
 npm run dist:linux    # Linux only (AppImage + .deb + .rpm)
@@ -130,23 +134,62 @@ on the account and do not leave a release token on a shared machine. Code signin
 ### Releasing (Windows)
 
 1. Bump `version` in `package.json`; write `tools/release-notes/v<version>.md`.
-2. `npm run dist:win`
-3. `node tools/release.mjs --check` — checks `latest.yml` against the exe
-   (version, name, sha512, size), adds `tye-Setup-x64.exe` (same bytes, fixed
-   name for the website) and `SHA256SUMS.txt`.
-4. `gh auth login` (yourself), then `node tools/release.mjs` — creates the
-   **draft** release `v<version>` with the six files. After a rebuild of the same
-   version, `node tools/release.mjs --replace` swaps the draft's files and notes.
-5. Look at the draft on GitHub, then `node tools/release.mjs --publish`.
-   Installed apps pick it up within 6 hours.
+2. Commit and push the branch, and build in a checkout of that commit
+   (`core.autocrlf=false`).
+3. `npm run dist:win`. It runs `npm ci` first (a clean install of the
+   commit's `package-lock.json`, so no hand-edited dependency file is built
+   in), then records the build inputs in the app, then builds.
+4. `node tools/release.mjs --check` — checks `dist/` (below), adds
+   `tye-Setup-x64.exe` (same bytes, fixed name for the website) and
+   `SHA256SUMS.txt`. Nothing is uploaded.
+5. `gh auth login` (yourself), then
+   `node tools/release.mjs --target <the commit's full sha>` — creates the
+   **draft** release `v<version>` with the six files, to be tagged at that
+   commit. After a fix and a rebuild of the same version (commit and push it
+   too), `node tools/release.mjs --replace --target <the new sha>` swaps the
+   draft's files and notes and points it at the new commit.
+6. Look at the draft on GitHub, then `node tools/release.mjs --publish`.
+   Installed apps pick it up within 6 hours. If a check after the publish
+   stops (GitHub slow to answer), run `--publish` again: on a published release
+   it only checks the files, the tag, the source and "latest", and changes
+   nothing.
 
-Every upload and the publish compare each file on GitHub with `dist/` (state,
-size, sha256) and stop on any difference.
+Each step stops, before it changes anything on GitHub, unless:
+
+- **`dist/` is one build of this folder:** `latest.yml` matches the installer
+  (version, name, sha512, size); every file packed into the app
+  (`dist/win-unpacked/resources/app.asar`, outside `node_modules/`) is the
+  folder's file byte for byte, and so is its `package.json` as
+  electron-builder trims it; the updater feed (`app-update.yml`) names
+  `build.publish`; both `.exe` files carry this version and are not older than
+  the app. The build record in the app (the sha256 of `package.json` and its
+  lock, npm's install record, `tools/build.mjs` and `tools/build-inputs.mjs`,
+  an electron-builder config file, everything in `build/`) is the folder's, so
+  the build ran through `tools/build.mjs` (a clean `npm ci` first) and no build
+  input changed, came or went after it. npm's install record matches
+  `package-lock.json`, and every package packed into the app is one of its
+  production packages at its locked version.
+- **the folder is the commit:** every file of the commit, byte for byte (git
+  blob sha), and no file the commit lacks, apart from `.git`, `dist/`,
+  `node_modules/` and what `.gitignore` and `.git/info/exclude` list (git's
+  rules; an unusual pattern stops the check). The build inputs and every file
+  packed into the app must be in the commit, whatever `.gitignore` says.
+- **the commit is on GitHub:** pushed to a branch, and the tag, once it exists,
+  is at that commit.
+- **GitHub holds `dist/`:** every file on the release has the state, size and
+  sha256 of the file in `dist/`, after each upload and before the publish.
+- **`--publish` only: the version is new.** The publish makes the release
+  "latest", so the version must be newer than the current latest.
+
+That keeps the installers, the tag and the release's "Source code" archives on
+one source, and catches a file edited after the build or built but never
+committed.
 
 From the web release that ships with 1.1.0, `/download` links
 `releases/latest/download/tye-Setup-x64.exe` and
 `releases/latest/download/tye-portable-x64.exe`, so the page does not change per
-release. Releases before 1.1.0 do not have those two names.
+release. v1.0.1 also carries those two names (copies of its 1.0.0 files), so
+they never answered 404 while 1.1.0 was being published.
 
 ## Download counts
 
