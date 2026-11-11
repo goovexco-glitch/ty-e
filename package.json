@@ -1,6 +1,6 @@
 {
   "name": "tyle-desktop",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "ty\\e — AI engineering assistant (desktop)",
   "main": "main.js",
   "author": {
@@ -14,15 +14,21 @@
   "scripts": {
     "start": "electron .",
     "dev": "TYLE_DEV_URL=http://localhost:8000/app electron .",
+    "icons": "python -I tools/mk_icons.py build",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder -mwl",
-    "dist:mac": "electron-builder --mac",
-    "dist:win": "electron-builder --win",
-    "dist:linux": "electron-builder --linux"
+    "dist": "electron-builder -mwl --publish never",
+    "dist:mac": "electron-builder --mac --publish never",
+    "dist:win": "electron-builder --win --publish never",
+    "dist:linux": "electron-builder --linux --publish never",
+    "release:win": "node tools/release.mjs",
+    "stats": "node tools/download-stats.mjs"
+  },
+  "dependencies": {
+    "electron-updater": "6.8.11"
   },
   "devDependencies": {
-    "electron": "^32.0.0",
-    "electron-builder": "^25.0.0"
+    "electron": "45.2.3",
+    "electron-builder": "26.18.0"
   },
   "build": {
     "appId": "com.goovex.tyle",
@@ -35,7 +41,11 @@
     "files": [
       "main.js",
       "preload.js",
-      "build/icon.*"
+      "updater.js",
+      "build/icon.png",
+      "build/tray.ico",
+      "build/tray.png",
+      "build/tray@2x.png"
     ],
     "mac": {
       "category": "public.app-category.productivity",
@@ -55,12 +65,20 @@
       ]
     },
     "nsis": {
+      "artifactName": "tye-Setup-${version}.${ext}",
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "ty\\e"
+      "shortcutName": "ty∖e",
+      "installerLanguages": ["en_US"],
+      "multiLanguageInstaller": false,
+      "installerSidebar": "build/installerSidebar.bmp",
+      "uninstallerSidebar": "build/uninstallerSidebar.bmp"
+    },
+    "portable": {
+      "artifactName": "tye-portable-x64.exe"
     },
     "linux": {
       "icon": "build/icon.png",
@@ -71,7 +89,7 @@
       "provider": "github",
       "owner": "goovexco-glitch",
       "repo": "ty-e",
-      "releaseType": "release"
+      "releaseType": "draft"
     }
   }
 }
